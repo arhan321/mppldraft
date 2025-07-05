@@ -46,36 +46,110 @@ class Order extends Model
         }
     }
 
-   protected static function booted(): void
+//    protected static function booted(): void
+//     {
+//         // Saat ORDER akan dibuat
+//         static::creating(function (Order $order) {
+
+//             // Jalankan di dalam transaksi DB
+//             DB::transaction(function () use ($order) {
+
+//                 /* ——— KUNCI baris kendaraan ——— */
+//                 $vehicle = $order->vehicle()      // relasi belongsTo
+//                     ->lockForUpdate()
+//                     ->firstOrFail();
+
+//                 if ($vehicle->stok <= 0) {
+//                     // Gagal: stok habis ➜ lempar validasi agar Filament
+//                     // otomatis menampilkan error di form
+//                     throw ValidationException::withMessages([
+//                         'vehicle_id' => 'Stok kendaraan habis.',
+//                     ]);
+//                 }
+
+//                 /* ——— Kurangi stok & simpan ——— */
+//                 $vehicle->decrement('stok');
+//             });
+//         });
+
+//         // (opsional) saat ORDER di-hapus ⇒ kembalikan stok
+//         static::deleted(function (Order $order) {
+//             $order->vehicle()->increment('stok');
+//         });
+//     }
+
+    protected static function booted(): void
     {
-        // Saat ORDER akan dibuat
+        /** ----------------------------------------------------------------
+         *  CREATE  ➜ stok –1
+         * ---------------------------------------------------------------- */
         static::creating(function (Order $order) {
+            self::withdrawStock($order->vehicle_id);
+        });
 
-            // Jalankan di dalam transaksi DB
-            DB::transaction(function () use ($order) {
+        /** ----------------------------------------------------------------
+         *  UPDATE  ➜   • ganti mobil?      → stok lama +1, stok baru –1  
+         *              • status → ditolak  → stok +1  
+         *              • status dari ditolak → aktif → stok –1
+         * ---------------------------------------------------------------- */
+        static::updating(function (Order $order) {
+            $oldVehicleId  = $order->getOriginal('vehicle_id');
+            $newVehicleId  = $order->vehicle_id;
+            $oldStatus     = $order->getOriginal('status');
+            $newStatus     = $order->status;
 
-                /* ——— KUNCI baris kendaraan ——— */
-                $vehicle = $order->vehicle()      // relasi belongsTo
-                    ->lockForUpdate()
-                    ->firstOrFail();
+            DB::transaction(function () use (
+                $oldVehicleId, $newVehicleId, $oldStatus, $newStatus
+            ) {
 
-                if ($vehicle->stok <= 0) {
-                    // Gagal: stok habis ➜ lempar validasi agar Filament
-                    // otomatis menampilkan error di form
-                    throw ValidationException::withMessages([
-                        'vehicle_id' => 'Stok kendaraan habis.',
-                    ]);
+                // ① Jika kendaraan diganti
+                if ($oldVehicleId !== $newVehicleId) {
+                    self::returnStock($oldVehicleId);
+                    self::withdrawStock($newVehicleId);
+                } else {
+                    // ② Kendaraan sama, tapi status berubah
+                    if ($oldStatus !== 'ditolak' && $newStatus === 'ditolak') {
+                        self::returnStock($newVehicleId);
+                    }
+
+                    if ($oldStatus === 'ditolak' && $newStatus !== 'ditolak') {
+                        self::withdrawStock($newVehicleId);
+                    }
                 }
-
-                /* ——— Kurangi stok & simpan ——— */
-                $vehicle->decrement('stok');
             });
         });
 
-        // (opsional) saat ORDER di-hapus ⇒ kembalikan stok
+        /** ----------------------------------------------------------------
+         *  DELETE  ➜ stok +1
+         * ---------------------------------------------------------------- */
         static::deleted(function (Order $order) {
-            $order->vehicle()->increment('stok');
+            self::returnStock($order->vehicle_id);
         });
+    }
+
+    /* ────────────────────────────────────────────────
+     |  Helper terkapsulasi: tarik & kembalikan stok
+     ────────────────────────────────────────────────*/
+    private static function withdrawStock(int $vehicleId): void
+    {
+        DB::transaction(function () use ($vehicleId) {
+            $vehicle = Vehicle::whereKey($vehicleId)->lockForUpdate()->firstOrFail();
+
+            if ($vehicle->stok <= 0) {
+                throw ValidationException::withMessages([
+                    'vehicle_id' => 'Stok kendaraan habis.',
+                ]);
+            }
+
+            $vehicle->decrement('stok');
+        });
+    }
+
+    private static function returnStock(int $vehicleId): void
+    {
+        Vehicle::whereKey($vehicleId)
+            ->lockForUpdate()
+            ->increment('stok');
     }
 
     public function getPaymentProofUrlAttribute()
